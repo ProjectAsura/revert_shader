@@ -265,6 +265,35 @@ void Reflection::AddConstantBuffer(const ConstantBuffer& value)
 { m_ConstantBuffers.push_back(value); }
 
 //-------------------------------------------------------------------------------------------------
+//      構造体を追加します.
+//-------------------------------------------------------------------------------------------------
+void Reflection::AddStructure(const Structure& value)
+{
+    // 登録済みかどうかチェック.
+    for(auto& itr : m_Structures)
+    {
+        if (itr.Name == value.Name)
+        { return; }
+    }
+
+    m_Structures.push_back(value);
+}
+
+//-------------------------------------------------------------------------------------------------
+//      入力引数を追加します.
+//-------------------------------------------------------------------------------------------------
+void Reflection::AddInputArgs(const std::string& value)
+{ m_InputArgs.push_back(value); }
+
+void Reflection::AddUavStructPair(const std::string& uav, const std::string& structure)
+{
+    if (m_UavStructureDictionary.find(uav) != m_UavStructureDictionary.end())
+    { return; }
+
+    m_UavStructureDictionary[uav] = structure;
+}
+
+//-------------------------------------------------------------------------------------------------
 //      マッピングを解決します.
 //-------------------------------------------------------------------------------------------------
 void Reflection::Resolve()
@@ -273,6 +302,8 @@ void Reflection::Resolve()
     ResolveOutput();
     ResolveTexture();
     ResolveSampler();
+    ResolveStructure();
+    ResolveUav();
     ResolveConstantBuffer();
 }
 
@@ -291,6 +322,9 @@ bool Reflection::QueryName(std::string value, std::string& result)
     { return true; }
 
     if (FindSamplerName(value, result))
+    { return true; }
+
+    if (FindUavName(value, result))
     { return true; }
 
     if (FindConstantBufferName(value, result))
@@ -340,6 +374,18 @@ const std::vector<std::string>& Reflection::GetDefTextures() const
 //-------------------------------------------------------------------------------------------------
 const std::vector<std::string>& Reflection::GetDefBuiltInOutput() const
 { return m_BuiltInOutputDefinitions; }
+
+//-------------------------------------------------------------------------------------------------
+//      構造体定義を取得します.
+//-------------------------------------------------------------------------------------------------
+const std::vector<std::string>& Reflection::GetDefStructures() const
+{ return m_StructureDefinitions; }
+
+//-------------------------------------------------------------------------------------------------
+//      UAV定義を取得します.
+//-------------------------------------------------------------------------------------------------
+const std::vector<std::string>& Reflection::GetDefUavs() const
+{ return m_UavDefinitions; }
 
 //-------------------------------------------------------------------------------------------------
 //      入力シグニチャを解決します.
@@ -409,6 +455,13 @@ void Reflection::ResolveInput()
         else if (input.SystemValue == "INSTID")
         {
             std::string code = "uint instanceId : SV_InstanceID";
+            m_InputArgs.push_back(code);
+        }
+        else
+        {
+            auto code = StringHelper::Format("%s %s", hlslType.c_str(), input.VarName.c_str());
+            code += " : " ;
+            code += input.Semantics;
             m_InputArgs.push_back(code);
         }
     }
@@ -864,6 +917,127 @@ void Reflection::ResolveConstantBuffer()
     }
 }
 
+void Reflection::ResolveStructure()
+{
+    for(size_t i=0; i<m_Structures.size(); ++i)
+    {
+        auto& st = m_Structures[i];
+
+        std::string code = "struct ";
+        code += st.Name;
+        code += "{\n";
+
+        for(size_t j=0; j<st.Members.size(); ++j)
+        {
+            auto& m = st.Members[j];
+            code += StringHelper::Format("%s %s;\n", m.Type, m.Name);
+        }
+
+        code += "};\n";
+
+        m_StructureDefinitions.push_back(code);
+    }
+}
+
+//-------------------------------------------------------------------------------------------------
+//      UAVを解決します.
+//-------------------------------------------------------------------------------------------------
+void Reflection::ResolveUav()
+{
+    for(size_t i=0; i<m_Resources.size(); ++i)
+    {
+        auto pRes = &m_Resources[i];
+        if (pRes->Type != "UAV")
+        { continue; }
+
+        // レジスタ番号を取得.
+        int reg = -1;
+        sscanf_s(pRes->HLSLBind.c_str(), "u%d", &reg);
+
+        ResourceInfo item = {};
+        item.Name       = pRes->Name;
+        item.pResource  = pRes;
+        item.ArraySize  = pRes->Count;
+        item.ArrayIndex = 0;
+        item.Register   = reg;
+        item.ExpandName = pRes->Name;
+
+        std::string type;
+
+        // 次元数を決定.
+        if (pRes->Dimension == "1d")
+        {
+            item.DimValue = 1;
+            type = "RWTexture1D";
+        }
+        else if (pRes->Dimension == "2d")
+        {
+            item.DimValue = 2;
+            type = "RWTexture2D";
+        }
+        else if (pRes->Dimension == "3d")
+        {
+            item.DimValue = 3;
+            type = "RWTexture3D";
+        }
+        else if (pRes->Dimension == "cube")
+        {
+            item.DimValue = 3;
+            type = "RWTextureCube";
+        }
+        else if (pRes->Dimension == "r/w")
+        {
+            if (pRes->Format == "struct")
+            {
+                item.DimValue = 1;
+                type = "RWStructuredBuffer";
+
+                std::string structType;
+                if (FindUavStructureName(pRes->Name, structType))
+                {
+                    type += "<";
+                    type += structType;
+                    type += ">";
+                }
+            }
+            else
+            {
+                // TODO : Implement.
+            }
+        }
+
+        if (pRes->Format != "struct")
+        {
+            type += "<";
+            type += pRes->Format;
+            type += ">";
+        }
+
+        // レジスタマップを作成 (u0 <--> 変数名 の対応付け).
+        if (pRes->Count > 1)
+        {
+            for(auto i=0; i<pRes->Count; ++i)
+            {
+                auto bind = StringHelper::Format("u%d", i);
+                item.ArrayIndex = static_cast<int>(i);
+                item.Register   = reg + i;
+                item.ExpandName = StringHelper::Format("%s[%d]", pRes->Name.c_str(), i);
+
+                m_UavDictionary[bind] = item;
+            }
+
+            auto code = StringHelper::Format("%s %s[%d] : register(u%d);\n", type.c_str(), pRes->Name.c_str(), pRes->Count, reg);
+            m_UavDefinitions.push_back(code);
+        }
+        else
+        {
+            m_UavDictionary[pRes->HLSLBind] = item;
+            auto code = StringHelper::Format("%s %s : register(u%d);\n", type.c_str(), pRes->Name.c_str(), reg);
+            m_UavDefinitions.push_back(code);
+        }
+    }
+}
+
 //-------------------------------------------------------------------------------------------------
 //      入力定義を問い合わせします.
 //-------------------------------------------------------------------------------------------------
@@ -925,6 +1099,30 @@ bool Reflection::QueryBuffer(const std::string& value, ConstantBufferInfo* pInfo
 }
 
 //-------------------------------------------------------------------------------------------------
+//      構造体定義を問い合わせします.
+//-------------------------------------------------------------------------------------------------
+bool Reflection::QueryStructure(const std::string& value, Structure* pInfo)
+{
+    if (m_StructureDictionary.find(value) == m_StructureDictionary.end())
+    { return false; }
+
+    *pInfo = m_StructureDictionary[value];
+    return true;
+}
+
+//-------------------------------------------------------------------------------------------------
+//      UAV定義を問い合わせします.
+//-------------------------------------------------------------------------------------------------
+bool Reflection::QueryUav(const std::string& value, ResourceInfo* pInfo)
+{
+    if (m_UavDictionary.find(value) == m_UavDictionary.end())
+    { return false; }
+
+    *pInfo = m_UavDictionary[value];
+    return true;
+}
+
+//-------------------------------------------------------------------------------------------------
 //      入力データを持つかどうかチェックします.
 //-------------------------------------------------------------------------------------------------
 bool Reflection::HasInput() const
@@ -960,13 +1158,19 @@ bool Reflection::HasBuffer() const
 bool Reflection::HasBuiltinOutput() const
 { return !m_BuiltInOutputDefinitions.empty(); }
 
+bool Reflection::HasStructure() const
+{ return !m_StructureDefinitions.empty(); }
+
+bool Reflection::HasUav() const
+{ return !m_UavDefinitions.empty(); }
+
 //-------------------------------------------------------------------------------------------------
 //      入力シグニチャを検索します.
 //-------------------------------------------------------------------------------------------------
 bool Reflection::FindInputName(const std::string& value, std::string& result)
 {
     std::string sign;
-    auto temp = value;
+    std::string temp = value;
 
     // 符号を取り除いておく.
     auto pos = temp.find("-");
@@ -1038,12 +1242,52 @@ bool Reflection::FindInputName(const std::string& value, std::string& result)
 
             return true;
         }
+
+        bool hit = false;
+
+        if (name == "vGSInstanceId")
+        {
+            result = "gsInstanceId";
+            hit = true;
+        }
+        else if (name == "vOutputControlPointID")
+        {
+            result = "controlPointId";
+            hit = true;
+        }
+        else if (name == "vThreadID")
+        {
+            result = "dispatchId";
+            hit = true;
+        }
+        else if (name == "vThreadGroupID")
+        {
+            result = "groupId";
+            hit = true;
+        }
+        else if (name == "vThreadIDInGroup")
+        {
+            result = "groupThreadId";
+            hit = true;
+        }
+        else if (name == "vThreadIDInGroupFlattened")
+        {
+            result = "groupIndex";
+            hit = true;
+        }
+
+        if (hit)
+        {
+            auto swz = StringHelper::GetSwizzle(temp);
+            result += swz;
+            return true;
+        }
+
         return false;
     };
 
     if (func(name))
     { return true; }
-
 
     return false;
 }
@@ -1154,6 +1398,35 @@ bool Reflection::FindSamplerName(const std::string& value, std::string& result)
 }
 
 //-------------------------------------------------------------------------------------------------
+//      UAVを検索します.
+//-------------------------------------------------------------------------------------------------
+bool Reflection::FindUavName(const std::string& value, std::string& result)
+{
+    if (m_UavDictionary.find(value) != m_UavDictionary.end())
+    {
+        auto& def = m_UavDictionary[value];
+        result = def.ExpandName;
+        return true;
+    }
+
+    return false;
+}
+
+//-------------------------------------------------------------------------------------------------
+//      UAV名に対応する構造体名を取得します.
+//-------------------------------------------------------------------------------------------------
+bool Reflection::FindUavStructureName(const std::string& value, std::string& result)
+{
+    if (m_UavStructureDictionary.find(value) != m_UavStructureDictionary.end())
+    {
+        result = m_UavStructureDictionary[value];
+        return true;
+    }
+
+    return false;
+}
+
+//-------------------------------------------------------------------------------------------------
 //      定数バッファを検索します.
 //-------------------------------------------------------------------------------------------------
 bool Reflection::FindConstantBufferName(const std::string& value, std::string& result)
@@ -1192,7 +1465,8 @@ bool Reflection::FindConstantBufferName(const std::string& value, std::string& r
         if (cb.VariableMap.find(temp) != cb.VariableMap.end())
         {
             auto& var = cb.VariableMap[temp];
-            result = sign + cb.Name + ".";
+            //result = sign + cb.Name + ".";
+            result = sign;
             result += var.ExpandNames.Name;
             result += var.ExpandNames.ArrayElement;
 
@@ -1520,7 +1794,7 @@ std::string Reflection::FilterPrimitive(std::string value, const SwizzleInfo& in
     if (pos2 == std::string::npos)
     { return value; }
 
-    if (pos2 - pos != 4)
+    if (pos2 - pos == 4)
     { return value; }
 
     auto line = value.substr(pos2);
@@ -1603,6 +1877,9 @@ bool Reflection::IsLiteral(std::string value, Literal* pInfo)
     return false;
 }
 
+//-------------------------------------------------------------------------------------------------
+//      スウィズル情報に変換します.
+//-------------------------------------------------------------------------------------------------
 SwizzleInfo Reflection::ToSwizzleInfo(std::string value)
 {
     auto swizzle = StringHelper::GetSwizzle(value);

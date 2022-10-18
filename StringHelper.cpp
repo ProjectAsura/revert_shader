@@ -222,9 +222,17 @@ std::wstring StringHelper::Format(const wchar_t* format, ...)
 //-------------------------------------------------------------------------------------------------
 int StringHelper::GetSwizzleCount(std::string value)
 {
-    auto temp = value;
+    std::string temp = value;
     // 即値は除外.
-    auto pos = temp.find("vec");
+    auto pos = temp.find("float");
+    if (pos != std::string::npos)
+    { return 0; }
+
+    pos = temp.find("uint");
+    if (pos != std::string::npos)
+    { return 0; }
+
+    pos = temp.find("int");
     if (pos != std::string::npos)
     { return 0; }
 
@@ -281,10 +289,18 @@ int StringHelper::GetSwizzleCount(std::string value)
 //-------------------------------------------------------------------------------------------------
 int StringHelper::GetSwizzleCount(std::wstring value)
 {
-    auto temp = value;
+    std::wstring temp = value;
 
     // 即値は除外.
-    auto pos = temp.find(L"vec");
+    auto pos = temp.find(L"float");
+    if (pos != std::wstring::npos)
+    { return 0; }
+
+    pos = temp.find(L"uint");
+    if (pos != std::wstring::npos)
+    { return 0; }
+
+    pos = temp.find(L"int");
     if (pos != std::wstring::npos)
     { return 0; }
 
@@ -341,10 +357,18 @@ int StringHelper::GetSwizzleCount(std::wstring value)
 //-------------------------------------------------------------------------------------------------
 std::string StringHelper::GetSwizzle(std::string value, int count)
 {
-    auto temp = value;
+    std::string temp = value;
 
     // 即値は除外.
-    auto pos = temp.find("vec");
+    auto pos = temp.find("float");
+    if (pos != std::string::npos)
+    { return std::string(); }
+
+    pos = temp.find("uint");
+    if (pos != std::string::npos)
+    { return std::string(); }
+
+    pos = temp.find("int");
     if (pos != std::string::npos)
     { return std::string(); }
 
@@ -409,9 +433,17 @@ std::string StringHelper::GetSwizzle(std::string value, int count)
 //-------------------------------------------------------------------------------------------------
 std::wstring StringHelper::GetSwizzle(std::wstring value, int count)
 {
-    auto temp = value;
+    std::wstring temp = value;
 
-    auto pos = temp.find(L"vec");
+    auto pos = temp.find(L"float");
+    if (pos != std::wstring::npos)
+    { return std::wstring(); }
+
+    pos = temp.find(L"uint");
+    if (pos != std::wstring::npos)
+    { return std::wstring(); }
+
+    pos = temp.find(L"int");
     if (pos != std::wstring::npos)
     { return std::wstring(); }
 
@@ -476,14 +508,22 @@ std::wstring StringHelper::GetSwizzle(std::wstring value, int count)
 std::string StringHelper::GetWithSwizzle(std::string value, int count)
 {
     bool strip = (count == -1);
-    auto temp = value;
+    std::string temp = value;
 
     if (count < 0)
     { count = 4; }
     if (count > 4)
     { count = 4; }
 
-    auto pos = temp.find("vec");
+    auto pos = temp.find("float");
+    if (pos != std::string::npos)
+    { return value; }
+
+    pos = temp.find("uint");
+    if (pos != std::string::npos)
+    { return value; }
+
+    pos = temp.find("int");
     if (pos != std::string::npos)
     { return value; }
 
@@ -564,7 +604,15 @@ std::wstring StringHelper::GetWithSwizzle(std::wstring value, int count)
     if (count > 4)
     { count = 4; }
 
-    auto pos = temp.find(L"vec");
+    auto pos = temp.find(L"float");
+    if (pos != std::wstring::npos)
+    { return value; }
+
+    pos = temp.find(L"uint");
+    if (pos != std::wstring::npos)
+    { return value; }
+
+    pos = temp.find(L"int");
     if (pos != std::wstring::npos)
     { return value; }
 
@@ -646,7 +694,15 @@ std::string StringHelper::GetWithSwizzleEx(std::string value, int count, const i
     if (count > 4)
     { count = 4; }
 
-    auto pos = temp.find("vec");
+    auto pos = temp.find("float");
+    if (pos != std::string::npos)
+    { return value; }
+
+    pos = temp.find("uint");
+    if (pos != std::string::npos)
+    { return value; }
+
+    pos = temp.find("int");
     if (pos != std::string::npos)
     { return value; }
 
@@ -739,7 +795,15 @@ std::wstring StringHelper::GetWithSwizzleEx(std::wstring value, int count, const
     if (count > 4)
     { count = 4; }
 
-    auto pos = temp.find(L"vec");
+    auto pos = temp.find(L"float");
+    if (pos != std::wstring::npos)
+    { return value; }
+
+    pos = temp.find(L"uint");
+    if (pos != std::wstring::npos)
+    { return value; }
+
+    pos = temp.find(L"int");
     if (pos != std::wstring::npos)
     { return value; }
 
@@ -825,7 +889,7 @@ std::wstring StringHelper::GetWithSwizzleEx(std::wstring value, int count, const
 std::vector<std::string> StringHelper::SplitArrayElement(std::string value)
 {
     std::vector<std::string> result;
-    auto temp = value;
+    std::string temp = value;
     std::string l = "[";
     std::string r = "]";
     auto posL = temp.find(l);
@@ -849,7 +913,7 @@ std::vector<std::string> StringHelper::SplitArrayElement(std::string value)
 std::vector<std::wstring> StringHelper::SplitArrayElement(std::wstring value)
 {
     std::vector<std::wstring> result;
-    auto temp = value;
+    std::wstring temp = value;
     std::wstring l = L"[";
     std::wstring r = L"]";
     auto posL = temp.find(l);
@@ -873,7 +937,7 @@ std::vector<std::wstring> StringHelper::SplitArrayElement(std::wstring value)
 std::vector<int> StringHelper::SplitArrayElementAsInt(std::string value)
 {
     std::vector<int> result;
-    auto temp = value;
+    std::string temp = value;
     std::string l = "[";
     std::string r = "]";
     auto posL = temp.find(l);
@@ -897,7 +961,7 @@ std::vector<int> StringHelper::SplitArrayElementAsInt(std::string value)
 std::vector<int> StringHelper::SplitArrayElementAsInt(std::wstring value)
 {
     std::vector<int> result;
-    auto temp = value;
+    std::wstring temp = value;
     std::wstring l = L"[";
     std::wstring r = L"]";
     auto posL = temp.find(l);

@@ -78,6 +78,17 @@ struct ConstantBuffer
 };
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
+// Structure structure
+///////////////////////////////////////////////////////////////////////////////////////////////////
+struct Structure
+{
+    std::string                 Name;
+    int                         Size;
+    std::vector<Variable>       Members;
+    std::vector<std::string>    UavNames;
+};
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
 // Literal structure
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 struct Literal
@@ -165,6 +176,9 @@ public:
     void AddInputSignature  (const Signature& value);
     void AddOutputSignature (const Signature& value);
     void AddConstantBuffer  (const ConstantBuffer& value);
+    void AddStructure       (const Structure& value);
+    void AddInputArgs       (const std::string& value);
+    void AddUavStructPair   (const std::string& uav, const std::string& structure);
 
     void Resolve();
     bool QueryName(std::string value, std::string& result);
@@ -176,17 +190,23 @@ public:
     const std::vector<std::string>& GetDefSamplers          () const;
     const std::vector<std::string>& GetDefTextures          () const;
     const std::vector<std::string>& GetDefBuiltInOutput     () const;
+    const std::vector<std::string>& GetDefStructures        () const;
+    const std::vector<std::string>& GetDefUavs              () const;
 
     bool QuerySampler   (const std::string& value, ResourceInfo* pInfo);
     bool QueryTexture   (const std::string& value, ResourceInfo* pInfo);
+    bool QueryUav       (const std::string& value, ResourceInfo* pInfo);
     bool QueryInput     (const std::string& value, Signature* pInfo);
     bool QueryOutput    (const std::string& value, Signature* pInfo);
     bool QueryBuffer    (const std::string& value, ConstantBufferInfo* pInfo);
-    bool HasInput   () const;
-    bool HasOutput  () const;
-    bool HasTexture () const;
-    bool HasSampler () const;
-    bool HasBuffer  () const;
+    bool QueryStructure (const std::string& value, Structure* pInfo);
+    bool HasInput       () const;
+    bool HasOutput      () const;
+    bool HasTexture     () const;
+    bool HasSampler     () const;
+    bool HasBuffer      () const;
+    bool HasStructure   () const;
+    bool HasUav         () const;
     bool HasBuiltinOutput() const;
 
     std::string GetCastedString(std::string value, const SwizzleInfo& info);
@@ -205,6 +225,7 @@ private:
     std::vector<Signature>      m_InputSignatures;
     std::vector<Signature>      m_OutputSignatures;
     std::vector<ConstantBuffer> m_ConstantBuffers;
+    std::vector<Structure>      m_Structures;
 
     std::vector<std::string>    m_BuiltInInputDefinitions;
     std::vector<std::string>    m_BuiltInOutputDefinitions;
@@ -214,12 +235,17 @@ private:
     std::vector<std::string>    m_ConstantBufferDefinitions;
     std::vector<std::string>    m_TextureDefinitions;
     std::vector<std::string>    m_SamplerDefinitions;
+    std::vector<std::string>    m_StructureDefinitions;
+    std::vector<std::string>    m_UavDefinitions;
 
     std::map<std::string, Signature>            m_InputDictionary;
     std::map<std::string, Signature>            m_OutputDictionary;
     std::map<std::string, ResourceInfo>         m_TextureDictionary;
     std::map<std::string, ResourceInfo>         m_SamplerDictionary;
     std::map<std::string, ConstantBufferInfo>   m_ConstantBufferDictionary;
+    std::map<std::string, Structure>            m_StructureDictionary;
+    std::map<std::string, ResourceInfo>         m_UavDictionary;
+    std::map<std::string, std::string>          m_UavStructureDictionary;   // UAV名 <---> 構造体名.
 
     //=============================================================================================
     // private methods.
@@ -228,13 +254,17 @@ private:
     void ResolveOutput          ();
     void ResolveTexture         ();
     void ResolveSampler         ();
+    void ResolveStructure       ();
+    void ResolveUav             ();
     void ResolveConstantBuffer  ();
 
     bool FindInputName          (const std::string& value, std::string& result);
     bool FindOutputName         (const std::string& value, std::string& result);
     bool FindTextureName        (const std::string& value, std::string& result);
     bool FindSamplerName        (const std::string& value, std::string& result);
+    bool FindUavName            (const std::string& value, std::string& result);
     bool FindConstantBufferName (const std::string& value, std::string& result);
+    bool FindUavStructureName   (const std::string& value, std::string& result);
 
     std::string FilterLiteral   (std::string value, const SwizzleInfo& info);
     std::string FilterPrimitive (std::string value, const SwizzleInfo& info);

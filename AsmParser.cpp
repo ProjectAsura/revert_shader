@@ -165,8 +165,12 @@ bool AsmParser::Parse()
     memset(buf, 0, sizeof(buf));
 
     auto instructionCount = 0;
+    bool uavInfo = false;
+    bool structInfo = false;
+    std::string uavName;
 
     a3d::ConstantBuffer cbDef = {};
+    a3d::Structure structDef = {};
 
     std::string line;
     for(;;)
@@ -251,6 +255,30 @@ bool AsmParser::Parse()
 
                 if (StringHelper::Contain(decl, "}") >= 1)
                 {
+                    if (structInfo)
+                    {
+                        structDef.Members.shrink_to_fit();
+                        structInfo = false;
+
+                        m_Reflection.AddStructure(structDef);
+
+                        continue;
+                    }
+
+                    if (uavInfo)
+                    {
+                        if (structDef.Name == "" && !structDef.Members.empty())
+                        {
+                            m_Reflection.AddUavStructPair(uavName, structDef.Members.front().Type);
+                        }
+
+                        structDef = a3d::Structure();
+                        uavName.clear();
+
+                        uavInfo = false;
+                        continue;
+                    }
+
                     // 追加登録.
                     cbDef.Variables.shrink_to_fit();
                     m_Reflection.AddConstantBuffer(cbDef);
@@ -267,8 +295,21 @@ bool AsmParser::Parse()
 
                     cbDef.Name = StringHelper::Replace(args[1], "$", "");
                 }
+                else if (StringHelper::Contain(decl, "struct") >= 1 && uavInfo)
+                {
+                    structDef.Name = args[1];
+                    structInfo = true;
+                    m_Reflection.AddUavStructPair(uavName, structDef.Name);
+                }
                 else
                 {
+                    if (args.size() == 5 && StringHelper::Contain(decl, "Resource bind info for") >= 1) 
+                    {
+                        uavInfo = true;
+                        uavName = args[4];
+                        continue;
+                    }
+
                     assert(args.size() >= 6);
                     a3d::Variable varDef = {};
                     varDef.Type     = args[0];
@@ -277,7 +318,11 @@ bool AsmParser::Parse()
                     varDef.Size     = std::stoi(args[5]);
                     varDef.Layout   = layout;
 
-                    cbDef.Variables.push_back(varDef);
+                    if (!uavInfo)
+                    { cbDef.Variables.push_back(varDef); }
+                    else
+
+                    { structDef.Members.push_back(varDef); }
                 }
             }
             // リソースバインディングの定義.
@@ -324,9 +369,9 @@ bool AsmParser::Parse()
             }
             else if (m_OutputSection)
             {
-                if (StringHelper::Contain(line, "no Input") >= 1)
+                if (StringHelper::Contain(line, "no Output") >= 1)
                 {
-                    // 入力データがない場合はすっ飛ばす.
+                    // 出力データがない場合はすっ飛ばす.
                     continue;
                 }
 
@@ -432,9 +477,17 @@ void AsmParser::ParseAsm()
             find = true;
         }
 
-        // Shader Model 4.0 のアセンブリ命令を解析.
+        // アセンブリ命令を解析.
         if (find)
-        { ParseInstruction(); }
+        {
+            if (ParseInstructionSM5())
+            { continue; }
+
+            if (ParseInstructionSM4())
+            { continue; }
+
+            m_Tokenizer.Next(); // 見つからない場合.
+        }
         else
         { m_Tokenizer.Next(); } // プロファイルが出るまではコメント行とみなしてすっ飛ばす.
     }
@@ -443,13 +496,10 @@ void AsmParser::ParseAsm()
 //-------------------------------------------------------------------------------------------------
 //      Shader Model 4.0 の命令を解析します.
 //-------------------------------------------------------------------------------------------------
-void AsmParser::ParseInstruction()
+bool AsmParser::ParseInstructionSM4()
 {
     // MSDN - Shader Model 4 Assembly.
     // https://msdn.microsoft.com/en-us/library/windows/desktop/bb943998(v=vs.85).aspx 参照.
-
-    // TODO : Support Shader Model 5.
-
 
     bool sat = ContainTag("_sat");
 
@@ -461,24 +511,31 @@ void AsmParser::ParseInstruction()
     {
         PushLogicOp("&");
     }
-    else if (FindTag("break"))
+    else if (m_Tokenizer.Compare("break"))
     {
-        m_Instructions.push_back("break;\n");
+        PushInstruction("break;\n");
+        m_Indent--;
         m_Tokenizer.Next();
     }
-    else if (FindTag("breakc"))
+    else if (m_Tokenizer.Compare("breakc_z"))
+    {
+        auto cond = GetOperand();
+        std::string cmd = "if (" + cond + " == 0) { break; }\n";
+        PushInstruction(cmd);
+    }
+    else if (m_Tokenizer.Compare("breakc_nz"))
+    {
+        auto cond = GetOperand();
+        std::string cmd = "if (" + cond + " != 0) { break; }\n";
+        PushInstruction(cmd);
+    }
+    else if (m_Tokenizer.Compare("call"))
     {
         // TODO : Implementation
         auto tag = m_Tokenizer.NextAsChar();
         m_Tokenizer.SkipLine();
     }
-    else if (FindTag("call"))
-    {
-        // TODO : Implementation
-        auto tag = m_Tokenizer.NextAsChar();
-        m_Tokenizer.SkipLine();
-    }
-    else if (FindTag("callc"))
+    else if (m_Tokenizer.Compare("callc"))
     {
         // TODO : Implementation
         auto tag = m_Tokenizer.NextAsChar();
@@ -489,7 +546,8 @@ void AsmParser::ParseInstruction()
         std::string val;
         Get1(val);
         std::string cmd = "case " + val + ":\n";
-        m_Instructions.push_back(cmd);
+        PushInstruction(cmd);
+        m_Indent++;
     }
     else if (FindTag("cut"))
     {
@@ -499,7 +557,7 @@ void AsmParser::ParseInstruction()
     }
     else if (FindTag("continue"))
     {
-        m_Instructions.push_back("continue;\n");
+        PushInstruction("continue;\n");
         m_Tokenizer.Next();
     }
     else if (FindTag("continuec"))
@@ -530,7 +588,7 @@ void AsmParser::ParseInstruction()
         std::string reg = m_Tokenizer.NextAsChar();
         std::string cnt = m_Tokenizer.NextAsChar();
         std::string cmd = StringHelper::Format("float%s %s;\n", cnt.c_str(), reg.c_str());
-        m_Instructions.push_back(cmd);
+        PushInstruction(cmd);
     }
     else if (FindTag("dcl_indexRange"))
     {
@@ -603,7 +661,7 @@ void AsmParser::ParseInstruction()
         {
             sprintf_s(buf, "r%d", i);
             std::string temp = "float4 " + std::string(buf) + ";\n";
-            m_Instructions.push_back(temp);
+            PushInstruction(temp);
         }
 
         // 空行を入れる.
@@ -611,7 +669,8 @@ void AsmParser::ParseInstruction()
     }
     else if (FindTag("default"))
     {
-        m_Instructions.push_back("default:\n");
+        PushInstruction("default:\n");
+        m_Indent++;
         m_Tokenizer.Next();
     }
     else if (FindTag("deriv_rtx"))
@@ -627,14 +686,14 @@ void AsmParser::ParseInstruction()
         std::string val;
         Get1(val);
         std::string cmd = "if (" + val + " != 0 ) { discard; }\n";
-        m_Instructions.push_back(cmd);
+        PushInstruction(cmd);
     }
     else if (FindTag("discard_z"))
     {
         std::string val;
         Get1(val);
         std::string cmd = "if (" + val + " == 0 ) { discard; }\n";
-        m_Instructions.push_back(cmd);
+        PushInstruction(cmd);
     }
     else if (FindTag("div"))
     {
@@ -654,7 +713,11 @@ void AsmParser::ParseInstruction()
     }
     else if (FindTag("else"))
     {
-        m_Instructions.push_back("else {\n");
+        m_Indent--;
+        PushInstruction("}\n");
+        PushInstruction("else\n");
+        PushInstruction("{\n");
+        m_Indent++;
         m_Tokenizer.Next();
     }
     else if (FindTag("emit"))
@@ -669,17 +732,20 @@ void AsmParser::ParseInstruction()
     }
     else if (FindTag("endif"))
     {
-        m_Instructions.push_back("}\n");
+        m_Indent--;
+        PushInstruction("}\n");
         m_Tokenizer.Next();
     }
     else if (FindTag("endloop"))
     {
-        m_Instructions.push_back("}\n");
+        m_Indent--;
+        PushInstruction("}\n");
         m_Tokenizer.Next();
     }
     else if (FindTag("endswitch"))
     {
-        m_Instructions.push_back("}\n");
+        m_Indent--;
+        PushInstruction("}\n");
         m_Tokenizer.Next();
     }
     else if (FindTag("eq"))
@@ -718,15 +784,19 @@ void AsmParser::ParseInstruction()
     {
         std::string val;
         Get1(val);
-        std::string cmd = "if (" + FilterSat( val, sat ) + ") {\n";
-        m_Instructions.push_back(cmd);
+        std::string cmd = "if (" + FilterSat( val, sat ) + ")\n";
+        PushInstruction(cmd);
+        PushInstruction("{\n");
+        m_Indent++;
     }
     else if (FindTag("if_nz"))
     {
         std::string val;
         Get1(val);
-        std::string cmd = "if (!" + FilterSat( val, sat ) + ") {\n";
-        m_Instructions.push_back(cmd);
+        std::string cmd = "if (" + FilterSat( val, sat ) + " != 0)\n";
+        PushInstruction(cmd);
+        PushInstruction("{\n");
+        m_Indent++;
     }
     else if (FindTag("ige"))
     {
@@ -746,17 +816,34 @@ void AsmParser::ParseInstruction()
     }
     else if (FindTag("imul"))
     {
-        PushOp2("*", sat);
+        std::string dstHi;
+        std::string dstLo;
+        std::string lhs;
+        std::string rhs;
+        Get4(dstHi, dstLo, lhs, rhs);
+
+        if (dstLo == "null")
+        {
+            std::string cmd = dstHi + " = " + lhs + " * " + rhs + ";\n";
+            PushInstruction(cmd);
+        }
+        else
+        {
+            std::string cmd = dstLo + " = " + lhs + " * " + rhs + ";\n";
+            PushInstruction(cmd);
+        }
     }
-    else if (FindTag("ine"))
+    else if (m_Tokenizer.Compare("ine"))
     {
         PushCmp("!=", true);
     }
-    else if (FindTag("ineg"))
+    else if (m_Tokenizer.Compare("ineg"))
     {
-        // TODO : Implementation
         std::string dst, src;
         Get2(dst, src);
+
+        std::string cmd = dst + " = " + "~" + src + ";\n";
+        PushInstruction(cmd);
     }
     else if (FindTag("ishl"))
     {
@@ -782,7 +869,7 @@ void AsmParser::ParseInstruction()
         std::string texcoord;
         GetLoad(dest, texture, texcoord);
         std::string cmd = dest + " = " + texture + ".Load(" + texcoord + ");\n";
-        m_Instructions.push_back(cmd);
+        PushInstruction(cmd);
     }
     else if (FindTag("ld_aoffimmi"))
     {
@@ -792,7 +879,7 @@ void AsmParser::ParseInstruction()
         std::string offset;
         GetLoadOffset(dest, texture, texcoord, offset);
         std::string cmd = dest + " = " + texture + ".Load(" + texcoord + ", " + offset + ");\n";
-        m_Instructions.push_back(cmd);
+        PushInstruction(cmd);
     }
     else if (FindTag("log"))
     {
@@ -800,7 +887,9 @@ void AsmParser::ParseInstruction()
     }
     else if (FindTag("loop"))
     {
-        m_Instructions.push_back("while(1) {\n");
+        PushInstruction("while(1)\n");
+        PushInstruction("{\n");
+        m_Indent++;
         m_Tokenizer.Next();
     }
     else if (FindTag("lt"))
@@ -855,7 +944,7 @@ void AsmParser::ParseInstruction()
         GetResInfo(dest, texture, mipLevel);
 
         std::string cmd = dest + " = " + "GetResourceInfo(" + texture + ", " + mipLevel + ");\n";
-        m_Instructions.push_back(cmd);
+        PushInstruction(cmd);
 
         m_HasGetResourceInfo = true;
     }
@@ -863,13 +952,15 @@ void AsmParser::ParseInstruction()
     {
         std::string op = GetOperand();
         std::string cmd = "if (" + op + ") return;\n";
-        m_Instructions.push_back(cmd);
+        PushInstruction(cmd);
+        m_Indent++;
     }
     else if (m_Tokenizer.Compare("retc_nz"))
     {
         std::string op = GetOperand();
         std::string cmd = "if (!" + op + ") return;\n";
-        m_Instructions.push_back(cmd);
+        PushInstruction(cmd);
+        m_Indent++;
     }
     else if (m_Tokenizer.Compare("ret"))
     {
@@ -904,7 +995,7 @@ void AsmParser::ParseInstruction()
         GetSample0(dest, texture, sampler, texcoord);
 
         std::string cmd = dest + " = " + texture + ".Sample(" + sampler + ", " + texcoord + ");\n";
-        m_Instructions.push_back(cmd);
+        PushInstruction(cmd);
     }
     else if (m_Tokenizer.Compare("sample_aoffimmi"))
     {
@@ -916,7 +1007,7 @@ void AsmParser::ParseInstruction()
         GetSampleOffset0(dest, texture, sampler, texcoord, offset);
 
         std::string cmd = dest + " = " + texture + ".Sample(" + sampler + ", " + texcoord + ", " + offset + ");\n";
-        m_Instructions.push_back(cmd);
+        PushInstruction(cmd);
     }
     else if (m_Tokenizer.Compare("sample_b"))
     {
@@ -928,7 +1019,7 @@ void AsmParser::ParseInstruction()
         GetSample1( dest, texture, sampler, texcoord, lodBias);
 
         std::string cmd = dest + " = " + texture + "SampleBias(" + sampler + "," + texcoord + ", " + lodBias + ");\n";
-        m_Instructions.push_back(cmd);
+        PushInstruction(cmd);
     }
     else if (m_Tokenizer.Compare("sample_b_aoffimmi"))
     {
@@ -941,7 +1032,7 @@ void AsmParser::ParseInstruction()
         GetSampleOffset1( dest, texture, sampler, texcoord, offset, lodBias );
 
         std::string cmd = dest + " = " + texture + ".SampleBias(" + sampler + ", " + texcoord + ", " + lodBias + ", " + offset + ");\n";
-        m_Instructions.push_back(cmd);
+        PushInstruction(cmd);
     }
     else if (m_Tokenizer.Compare("sample_c"))
     {
@@ -953,7 +1044,7 @@ void AsmParser::ParseInstruction()
         GetSample1(dst, texture, sampler, texcoord, refValue);
 
         std::string cmd = dst + " = " + texture + ".SampleCmp(" + sampler + ", " + texcoord + ", " + refValue + ");\n";
-        m_Instructions.push_back(cmd);
+        PushInstruction(cmd);
     }
     else if (m_Tokenizer.Compare("sample_c_aoffimmi"))
     {
@@ -966,7 +1057,7 @@ void AsmParser::ParseInstruction()
         GetSampleOffset1(dest, texture, sampler, texcoord, offset, refValue);
 
         std::string cmd = dest + " = " + texture + ".SampleCmp(" + sampler + ", " + texcoord + ", " + refValue + ", " + offset + ");\n";
-        m_Instructions.push_back(cmd);
+        PushInstruction(cmd);
     }
     else if (m_Tokenizer.Compare("sample_c_lz"))
     {
@@ -978,7 +1069,7 @@ void AsmParser::ParseInstruction()
         GetSample1( dest, texture, sampler, texcoord, refValue );
 
         std::string cmd = dest + " = " + texture + ".SampleCmpLevelZero(" + sampler + ", " + texcoord + ", "  + refValue + ");\n";
-        m_Instructions.push_back(cmd);
+        PushInstruction(cmd);
     }
     else if (m_Tokenizer.Compare("sample_c_lz_aoffimmi"))
     {
@@ -991,7 +1082,7 @@ void AsmParser::ParseInstruction()
         GetSampleOffset1( dest, texture, sampler, texcoord, offset, refValue );
 
         std::string cmd = dest + " = " + texture + ".SampleCmpLevelZero(" + sampler + ", " + texcoord + ", " + refValue + ", " + offset + ");\n";
-        m_Instructions.push_back(cmd);
+        PushInstruction(cmd);
     }
     else if (m_Tokenizer.Compare("sample_d"))
     {
@@ -1005,7 +1096,7 @@ void AsmParser::ParseInstruction()
 
         std::string left = texture + ".SampleGrad(" + sampler + ", " + texcoord + ", " + xDerivative + ", " + yDerivative + ")";
         std::string cmd = dest + " = " + FilterSat( left, sat ) + ";\n";
-        m_Instructions.push_back(cmd);
+        PushInstruction(cmd);
     }
     else if(m_Tokenizer.Compare("sample_d_aoffimmi"))
     {
@@ -1020,19 +1111,7 @@ void AsmParser::ParseInstruction()
 
         std::string left = texture + ".SampleGrad(" + sampler + ", " + texcoord + ", " + xDerivative + ", " + yDerivative + ", " + offset + ")";
         std::string cmd  = dest + " = " + FilterSat( left, sat ) + ";\n";
-        m_Instructions.push_back(cmd);
-    }
-    else if (m_Tokenizer.Compare("sample_indexable"))
-    {
-        std::string dest;
-        std::string texcoord;
-        std::string texture;
-        std::string sampler;
-        GetSampleIndexable0(dest, texture, sampler, texcoord);
-
-        std::string left = texture + ".Sample(" + sampler + ", " + texcoord + ")";
-        std::string cmd = dest + " = " + FilterSat(left, sat) + ";\n";
-        m_Instructions.push_back(cmd);
+        PushInstruction(cmd);
     }
     else if (m_Tokenizer.Compare("sample_l"))
     {
@@ -1045,7 +1124,7 @@ void AsmParser::ParseInstruction()
 
         std::string left = texture + ".SampleLevel(" + sampler + ", " + texcoord + ", " + lod + ")";
         std::string cmd  = dest + " = " + FilterSat( left, sat ) + ";\n";
-        m_Instructions.push_back(cmd);
+        PushInstruction(cmd);
     }
     else if (m_Tokenizer.Compare("sample_l_aoffimmi"))
     {
@@ -1059,9 +1138,9 @@ void AsmParser::ParseInstruction()
 
         std::string left = texture + ".SampleLevel(" + sampler + ", " + texcoord + ", " + lod + ", " + offset + ")";
         std::string cmd  = dest + " = " + FilterSat( left, sat ) + ";\n";
-        m_Instructions.push_back(cmd);
+        PushInstruction(cmd);
     }
-    else if (m_Tokenizer.Compare("sincos"))
+    else if (FindTag("sincos"))
     {
         std::string dstSin = m_Tokenizer.NextAsChar();
         std::string dstCos = m_Tokenizer.NextAsChar();
@@ -1083,15 +1162,15 @@ void AsmParser::ParseInstruction()
         if (dstSin != "null")
         {
             cmd1 = dstSin + " = " + FilterSat( left1, sat ) + ";\n";
-            m_Instructions.push_back(cmd1);
+            PushInstruction(cmd1);
         }
         if (dstCos != "null")
         { 
             cmd2 = dstCos + " = " + FilterSat( left2, sat ) + ";\n";
-            m_Instructions.push_back(cmd2);
+            PushInstruction(cmd2);
         }
     }
-    else if (m_Tokenizer.Compare("sqrt"))
+    else if (FindTag("sqrt"))
     {
         PushCmd2("sqrt", sat);
     }
@@ -1099,53 +1178,1131 @@ void AsmParser::ParseInstruction()
     {
         std::string val = m_Tokenizer.NextAsChar();
         std::string cmd = "switch(" + val + ") {\n";
-        m_Instructions.push_back(cmd);
+        PushInstruction(cmd);
+        m_Indent++;
     }
-    else if (m_Tokenizer.Compare("udiv"))
+    else if (FindTag("udiv"))
     {
-        std::string op1, op2, op3, op4;
-        Get4(op1, op2, op3, op4);
+        std::string dstQUOT, dstREM, lhs, rhs;
+        Get4(dstQUOT, dstREM, lhs, rhs);
+
+        if (dstREM != "null")
+        {
+            std::string cmd = dstREM + " = " + lhs + " % " + rhs + ";\n";
+            PushInstruction(cmd);
+        }
+        if (dstQUOT != "null")
+        {
+            std::string cmd = dstQUOT + " = " + lhs + " / " + rhs + ";\n";
+            PushInstruction(cmd);
+        }
     }
-    else if (m_Tokenizer.Compare("uge"))
+    else if (FindTag("uge"))
     {
         PushCmp(">=", true);
     }
-    else if (m_Tokenizer.Compare("ult"))
+    else if (FindTag("ult"))
     {
         PushCmp("<", true);
     }
-    else if (m_Tokenizer.Compare("umad"))
+    else if (FindTag("umad"))
     {
         PushOp3("*", "+", sat);
     }
-    else if (m_Tokenizer.Compare("umax"))
+    else if (FindTag("umax"))
     {
         PushCmd3("max", sat);
     }
-    else if (m_Tokenizer.Compare("umin"))
+    else if (FindTag("umin"))
     {
         PushCmd3("min", sat);
     }
-    else if (m_Tokenizer.Compare("umul"))
+    else if (FindTag("umul"))
     {
         PushOp2("*", sat);
     }
-    else if (m_Tokenizer.Compare("ushr"))
+    else if (FindTag("ushr"))
     {   
         PushShiftOp(">>");
     }
-    else if (m_Tokenizer.Compare("utof"))
+    else if (FindTag("utof"))
     {
         PushConvToFloat("asfloat", sat);
     }
-    else if (m_Tokenizer.Compare("xor"))
+    else if (FindTag("xor"))
     {
         PushLogicOp("^");
     }
     else
     {
-        m_Tokenizer.Next();
+        return false;
     }
+
+    return true;
+}
+
+//-------------------------------------------------------------------------------------------------
+//      Shader Model 5.0 の命令を解析します.
+//-------------------------------------------------------------------------------------------------
+bool AsmParser::ParseInstructionSM5()
+{
+    // MSDN - Shader Model 5 Assembly.
+    // https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/shader-model-5-assembly--directx-hlsl- 参照.
+
+    bool sat = ContainTag("_sat");
+
+    if (FindTag("atomic_and"))
+    {
+        std::string dst;
+        std::string dstAddress;
+        std::string src0;
+        Get3(dst, dstAddress, src0);
+
+        std::string cmd = std::string("InterlockedAnd(") + dst + ", " + src0 + ");\n";
+        PushInstruction(cmd);
+    }
+    else if (FindTag("atomic_cmp_store"))
+    {
+        std::string dst;
+        std::string dstAddress;
+        std::string src0;
+        std::string src1;
+        Get4(dst, dstAddress, src0, src1);
+
+        // TODO : Implement.
+    }
+    else if (FindTag("atomic_iadd"))
+    {
+        std::string dst;
+        std::string dstAddress;
+        std::string src0;
+        Get3(dst, dstAddress, src0);
+
+        std::string cmd = std::string("InterlockedAdd(") + dst + ", " + src0 + ");\n";
+        PushInstruction(cmd);
+    }
+    else if (FindTag("atomic_imax"))
+    {
+        std::string dst;
+        std::string dstAddress;
+        std::string src0;
+        Get3(dst, dstAddress, src0);
+
+        std::string cmd = std::string("InterlockedMax(") + dst + ", " + src0 + ");\n";
+        PushInstruction(cmd);
+    }
+    else if (FindTag("atomic_imin"))
+    {
+        std::string dst;
+        std::string dstAddress;
+        std::string src0;
+        Get3(dst, dstAddress, src0);
+
+        std::string cmd = std::string("InterlockedMin(") + dst + ", " + src0 + ");\n";
+        PushInstruction(cmd);
+    }
+    else if (FindTag("atomic_or"))
+    {
+        std::string dst;
+        std::string dstAddress;
+        std::string src0;
+        Get3(dst, dstAddress, src0);
+
+        std::string cmd = std::string("InterlockedOr(") + dst + ", " + src0 + ");\n";
+        PushInstruction(cmd);
+    }
+    else if (FindTag("atomic_umax"))
+    {
+        std::string dst;
+        std::string dstAddress;
+        std::string src0;
+        Get3(dst, dstAddress, src0);
+
+        std::string cmd = std::string("InterlockedMax(") + dst + ", " + src0 + ");\n";
+        PushInstruction(cmd);
+    }
+    else if (FindTag("atomic_umin"))
+    {
+        std::string dst;
+        std::string dstAddress;
+        std::string src0;
+        Get3(dst, dstAddress, src0);
+
+        std::string cmd = std::string("InterlockedMin(") + dst + ", " + src0 + ");\n";
+        PushInstruction(cmd);
+    }
+    else if (FindTag("atomic_xor"))
+    {
+        std::string dst;
+        std::string dstAddress;
+        std::string src0;
+        Get3(dst, dstAddress, src0);
+
+        std::string cmd = std::string("InterlockedXor(") + dst + ", " + src0 + ");\n";
+        PushInstruction(cmd);
+    }
+    else if (FindTag("bfi"))
+    {
+        std::string dst;
+        std::string src0;
+        std::string src1;
+        std::string src2;
+        std::string src3;
+        Get5(dst, src0, src1, src2, src3);
+
+        // TODO : Implement.
+    }
+    else if (FindTag("bfrev"))
+    {
+        PushCmd2("reversebits", sat);
+    }
+    else if (FindTag("bufinfo"))
+    {
+        std::string dst;
+        std::string srcResource;
+        Get2(dst, srcResource);
+
+        std::string cmd = srcResource + ".GetDimensions(" + dst + ");\n";
+        PushInstruction(cmd);
+    }
+    else if (FindTag("countbits"))
+    {
+        PushCmd2("countbits", sat);
+    }
+    else if (FindTag("cut_stream"))
+    {
+        std::string streamIndex = GetOperand();
+
+        // TODO : Implement.
+    }
+    else if (FindTag("dadd"))
+    {
+        PushOp2("+", sat);
+    }
+    else if (FindTag("dcl_function_body"))
+    {
+        auto label = m_Tokenizer.NextAsChar();
+        // TODO : Implement.
+    }
+    else if (FindTag("dcl_function_table"))
+    {
+        // TODO : Implement.
+        auto table = GetOperand();
+        while(m_Tokenizer.Compare("}"))
+        {
+            m_Tokenizer.Next();
+        }
+    }
+    else if (FindTag("dcl_hs_fork_phase_instance_count"))
+    {
+        // TODO : Implement.
+        while(m_Tokenizer.Compare("}"))
+        {
+            m_Tokenizer.Next();
+        }
+    }
+    else if (FindTag("dcl_hs_join_phase_instance_count"))
+    {
+        // TODO : Implement.
+        while(m_Tokenizer.Compare("}"))
+        {
+            m_Tokenizer.Next();
+        }
+    }
+    else if (FindTag("dcl_hs_max_tessfactor"))
+    {
+        // TODO : Implement.
+        auto count = m_Tokenizer.NextAsChar();
+    }
+    else if (FindTag("dcl_input"))
+    {
+        m_Tokenizer.Next();
+        if (m_Tokenizer.Compare("vForkInstanceID"))
+        {
+            // TODO : Implement.
+        }
+        else if (m_Tokenizer.Compare("vGSInstanceID"))
+        {
+            auto instanceCount = m_Tokenizer.NextAsChar();
+
+            std::string cmd = "uint gsInstanceId : SV_InstanceID";
+            m_Reflection.AddInputArgs(cmd);
+        }
+        else if (m_Tokenizer.Compare("vJoinInstanceID"))
+        {
+            // TODO : Implement.
+        }
+        else if (m_Tokenizer.Compare("vOutputControlPointID"))
+        {
+            std::string cmd = "uint controlPointId : SV_OutputControlPointID";
+            m_Reflection.AddInputArgs(cmd);
+        }
+        else if (FindTag("vThreadID"))
+        {
+            std::string id = m_Tokenizer.GetAsChar();
+            auto info = a3d::Reflection::ToSwizzleInfo(id);
+
+            std::string cmd = StringHelper::Format("uint%d dispatchId : SV_DispatchThreadID", info.Count);
+            m_Reflection.AddInputArgs(cmd);
+        }
+        else if (FindTag("vThreadGroupID"))
+        {
+            std::string id = m_Tokenizer.GetAsChar();
+            auto info = a3d::Reflection::ToSwizzleInfo(id);
+
+            std::string cmd = StringHelper::Format("uint%d groupId : SV_GroupID", info.Count);
+            m_Reflection.AddInputArgs(cmd);
+        }
+        else if (FindTag("vThreadIDInGroup"))
+        {
+            std::string id = m_Tokenizer.GetAsChar();
+            auto info = a3d::Reflection::ToSwizzleInfo(id);
+
+            std::string cmd = StringHelper::Format("uint%d groupThreadId : SV_GroupThreadID", info.Count);
+            m_Reflection.AddInputArgs(cmd);
+        }
+        else if (FindTag("vThreadIDInGroupFlattened"))
+        {
+            std::string id = m_Tokenizer.GetAsChar();
+            auto info = a3d::Reflection::ToSwizzleInfo(id);
+
+            std::string cmd = StringHelper::Format("uint%d groupIndex : SV_GroupIndex", info.Count);
+            m_Reflection.AddInputArgs(cmd);
+        }
+    }
+    else if (FindTag("dcl_input_control_point_count"))
+    {
+        // TODO : Implement.
+        while(m_Tokenizer.Compare("}"))
+        {
+            m_Tokenizer.Next();
+        }
+    }
+    else if (FindTag("dcl_interface"))
+    {
+        // TODO : Implement.
+        auto fp = GetOperand();
+        m_Tokenizer.Next(); // =
+        while(m_Tokenizer.Compare("}"))
+        {
+            m_Tokenizer.Next();
+        }
+    }
+    else if (FindTag("dcl_interface_dynamicindexed"))
+    {
+        // TODO : Implement.
+        auto fp = GetOperand();
+        m_Tokenizer.Next(); // =
+        while(m_Tokenizer.Compare("}"))
+        {
+            m_Tokenizer.Next();
+        }
+    }
+    else if (FindTag("dcl_output"))
+    {
+        auto mask = GetOperand();
+
+        // TODO : Implement.
+    }
+    else if (FindTag("dcl_output_control_point_count"))
+    {
+        auto count = m_Tokenizer.NextAsChar();
+        // TODO : Implement.
+    }
+    else if (FindTag("dcl_resource_raw"))
+    {
+        auto uav = GetOperand();
+        // TODO : Implement.
+    }
+    else if (FindTag("dcl_resource_structured"))
+    {
+        auto uav = GetOperand();
+        auto stride = GetOperand();
+        // TODO : Implement.
+    }
+    else if (FindTag("dcl_stream"))
+    {
+        auto count = m_Tokenizer.NextAsChar(); // m0, m1, m2, m3.
+        // TODO : Implement.
+    }
+    else if (FindTag("dcl_tessellator_domain"))
+    {
+        auto domain = m_Tokenizer.NextAsChar();
+        // TODO : Implement.
+    }
+    else if (FindTag("dcl_tessellator_output_primitive"))
+    {
+        auto primitive = m_Tokenizer.NextAsChar();
+        // TODO : Implement.
+    }
+    else if (FindTag("dcl_tessellator_partitioning"))
+    {
+        auto partition = m_Tokenizer.NextAsChar();
+        // TODO : Implement.
+    }
+    else if (FindTag("dcl_tgsm_raw"))
+    {
+        auto group     = m_Tokenizer.NextAsChar();
+        auto byteCount = m_Tokenizer.NextAsChar();
+        // TODO : Implement.
+    }
+    else if (FindTag("dcl_tgsm_structured"))
+    {
+        auto group  = m_Tokenizer.NextAsChar();
+        auto stride = m_Tokenizer.NextAsChar();
+        auto count  = m_Tokenizer.NextAsChar();
+        // TODO : Implement.
+    }
+    else if (FindTag("dcl_thread_group"))
+    {
+        auto x = m_Tokenizer.NextAsInt();
+        auto y = m_Tokenizer.NextAsInt();
+        auto z = m_Tokenizer.NextAsInt();
+
+        m_ThreadCountX = uint32_t(x);
+        m_ThreadCountY = uint32_t(y);
+        m_ThreadCountZ = uint32_t(z);
+    }
+    else if (FindTag("dcl_uav_raw"))
+    {
+        auto uav = GetOperand();
+        // TODO : Implement.
+    }
+    else if (FindTag("dcl_uav_structured"))
+    {
+        auto uav = GetOperand();
+        auto stride = m_Tokenizer.NextAsChar();
+        // TODO : Implement.
+    }
+    else if (FindTag("dcl_uav_typed"))
+    {
+        auto uav       = GetOperand();
+        auto dimension = m_Tokenizer.NextAsChar();
+        auto type      = m_Tokenizer.NextAsChar();
+        // TODO : Implement.
+    }
+    else if (FindTag("ddiv"))
+    {
+        PushOp2("/", sat);
+    }
+    else if (FindTag("deq"))
+    {
+        PushOp2("==", sat);
+    }
+    else if (FindTag("deriv_rtx_coarse"))
+    {
+        PushCmd2("ddx_coarse", sat);
+    }
+    else if (FindTag("deriv_rtx_fine"))
+    {
+        PushCmd2("ddx_fine", sat);
+    }
+    else if (FindTag("deriv_rty_coarse"))
+    {
+        PushCmd2("ddy_coarse", sat);
+    }
+    else if (FindTag("deriv_rty_fine"))
+    {
+        PushCmd2("ddy_fine", sat);
+    }
+    else if (FindTag("dfma"))
+    {
+        PushCmd4("fma", sat);
+    }
+    else if (FindTag("dge"))
+    {
+        PushOp2(">=", sat);
+    }
+    else if (FindTag("dlt"))
+    {
+        PushOp2("<", sat);
+    }
+    else if (FindTag("dmax"))
+    {
+        PushCmd2("max", sat);
+    }
+    else if (FindTag("dmin"))
+    {
+        PushCmd2("min", sat);
+    }
+    else if (FindTag("dmov"))
+    {
+        PushMov(sat);
+    }
+    else if (FindTag("dmovc"))
+    {
+        PushMovc(sat);
+    }
+    else if (FindTag("dmul"))
+    {
+        PushOp2("*", sat);
+    }
+    else if (FindTag("dne"))
+    {
+        PushOp2("!=", sat);
+    }
+    else if (FindTag("drcp"))
+    {
+        PushCmd2("rcp", sat);
+    }
+    else if (FindTag("dtof"))
+    {
+        PushCmd2("asfloat", sat);
+    }
+    else if (FindTag("emit_stream"))
+    {
+        auto streamIndex = m_Tokenizer.NextAsChar();
+        // TODO : Implement.
+    }
+    else if (FindTag("emitThenCut_stream"))
+    {
+        auto streamIndex = m_Tokenizer.NextAsChar();
+        // TODO : Implement.
+    }
+    else if (FindTag("f16tof32"))
+    {
+        PushCmd2("f16tof32", sat);
+    }
+    else if (FindTag("f32tof16"))
+    {
+        PushCmd2("f32tof16", sat);
+    }
+    else if (FindTag("fcall"))
+    {
+        auto fp = GetOperand();
+        // TODO : Implement.
+    }
+    else if (FindTag("firstbit"))
+    {
+        if (m_Tokenizer.Compare("firstbit_hi"))
+        {
+            PushCmd2("firstbithigh", sat);
+        }
+        else if (m_Tokenizer.Compare("firstbit_lo"))
+        {
+            PushCmd2("firstbitlow", sat);
+        }
+        else if (m_Tokenizer.Compare("fistbit_shi"))
+        {
+            PushCmd2("firstbithigh", sat);
+        }
+    }
+    else if (FindTag("ftod"))
+    {
+        PushCmd2("asdouble", sat);
+    }
+    else if (FindTag("gather4"))
+    {
+        if (m_Tokenizer.Compare("gather4_aoffimmi_indexable"))
+        {
+            std::string dest;
+            std::string texture;
+            std::string sampler;
+            std::string texcoord;
+            std::string offset;
+            GetSampleOffsetIndexable0(dest, texture, sampler, texcoord, offset);
+
+            std::string cmd = dest + " = " + texture + ".Gather(" + sampler + ", " + texcoord + ", " + offset + ");\n";
+            PushInstruction(cmd);
+        }
+        else if (m_Tokenizer.Compare("gather4_indexable"))
+        {
+            std::string dest;
+            std::string texcoord;
+            std::string texture;
+            std::string sampler;
+            GetSampleIndexable0(dest, texture, sampler, texcoord);
+
+            std::string left = texture + ".Gather(" + sampler + ", " + texcoord + ")";
+            std::string cmd = dest + " = " + FilterSat(left, sat) + ";\n";
+            PushInstruction(cmd);
+        }
+    }
+    else if (FindTag("gather4_c"))
+    {
+        if (m_Tokenizer.Compare("gather4_c_aoffimmi_indexable"))
+        {
+            std::string dest;
+            std::string texture;
+            std::string sampler;
+            std::string texcoord;
+            std::string offset;
+            std::string refValue;
+            GetSampleOffsetIndexable1(dest, texture, sampler, texcoord, offset, refValue);
+
+            std::string cmd = dest + " = " + texture + ".GatherCmp(" + sampler + ", " + texcoord + ", " + refValue + ", " + offset + ");\n";
+            PushInstruction(cmd);
+        }
+        else if (m_Tokenizer.Compare("gather4_c_indexable"))
+        {
+            std::string dst;
+            std::string texture;
+            std::string sampler;
+            std::string texcoord;
+            std::string refValue;
+            GetSampleIndexable1(dst, texture, sampler, texcoord, refValue);
+
+            std::string cmd = dst + " = " + texture + ".GatherCmp(" + sampler + ", " + texcoord + ", " + refValue + ");\n";
+            PushInstruction(cmd);
+        }
+    }
+    else if (FindTag("gather4_po"))
+    {
+        if (m_Tokenizer.Compare("gather4_po_aoffimmi_indexable"))
+        {
+            std::string dest;
+            std::string srcAddress;
+            std::string srcOffset;
+            std::string srcResource;
+            std::string srcSampler;
+            Get5(dest, srcAddress, srcOffset, srcResource, srcSampler);
+            // TODO : Implement.
+        }
+        else if (m_Tokenizer.Compare("gather4_po_indexable"))
+        {
+            std::string dest;
+            std::string srcAddress;
+            std::string srcOffset;
+            std::string srcResource;
+            std::string srcSampler;
+            Get5(dest, srcAddress, srcOffset, srcResource, srcSampler);
+            // TODO : Implement.
+        }
+    }
+    else if (FindTag("gather4_po_c"))
+    {
+        if (m_Tokenizer.Compare("gather4_po_c_aoffimmi_indexable"))
+        {
+            std::string dest;
+            std::string srcAddress;
+            std::string srcOffset;
+            std::string srcResource;
+            std::string srcSampler;
+            std::string srcReferenceValue;
+            Get6(dest, srcAddress, srcOffset, srcResource, srcSampler, srcReferenceValue);
+            // TODO : Implement.
+        }
+        else if (m_Tokenizer.Compare("gather4_po_c_indexable"))
+        {
+            std::string dest;
+            std::string srcAddress;
+            std::string srcOffset;
+            std::string srcResource;
+            std::string srcSampler;
+            std::string srcReferenceValue;
+            Get6(dest, srcAddress, srcOffset, srcResource, srcSampler, srcReferenceValue);
+            // TODO : Implement.
+        }
+    }
+    else if (FindTag("hs_control_point_phase"))
+    {
+        // TODO : Implement.
+    }
+    else if (FindTag("hs_decls"))
+    {
+        // TODO : Implement.
+    }
+    else if (FindTag("hs_fork_phase"))
+    {
+        // TODO : Implement.
+    }
+    else if (FindTag("hs_join_phase"))
+    {
+        // TODO : Implement.
+    }
+    else if (FindTag("ibfe"))
+    {
+        auto dest = GetOperand();
+        auto src0 = GetOperand();
+        auto src1 = GetOperand();
+        auto src2 = GetOperand();
+        // TODO : Implement.
+    }
+    else if (FindTag("imm_atomic_alloc"))
+    {
+        std::string dst;
+        std::string dstUAV;
+        Get2(dst, dstUAV);
+        // TODO : Implement.
+    }
+    else if (FindTag("imm_atomic_and"))
+    {
+        std::string dst0;
+        std::string dst1;
+        std::string dstAddress;
+        std::string src0;
+        Get4(dst0, dst1, dstAddress, src0);
+        // TODO : Implement.
+    }
+    else if (FindTag("imm_atomic_cmp_exch"))
+    {
+        std::string dst0;
+        std::string dst1;
+        std::string dstAddress;
+        std::string src0;
+        std::string src1;
+        Get5(dst0, dst1, dstAddress, src0, src1);
+        // TODO : Implement.
+    }
+    else if (FindTag("imm_atomic_consume"))
+    {
+        std::string dst0;
+        std::string dstUAV;
+        Get2(dst0, dstUAV);
+        // TODO : Implement.
+    }
+    else if (FindTag("imm_atomic_exch"))
+    {
+        std::string dst0;
+        std::string dst1;
+        std::string dstAddress;
+        std::string src0;
+        Get4(dst0, dst1, dstAddress, src0);
+        // TODOl : Implement.
+    }
+    else if (FindTag("imm_atomic_iadd"))
+    {
+        std::string dst0;
+        std::string dst1;
+        std::string dstAddress;
+        std::string src0;
+        Get4(dst0, dst1, dstAddress, src0);
+        // TODO : Implement.
+    }
+    else if (FindTag("imm_atomic_imax"))
+    {
+        std::string dst0;
+        std::string dst1;
+        std::string dstAddress;
+        std::string src0;
+        Get4(dst0, dst1, dstAddress, src0);
+        // TODO : Implement.
+    }
+    else if (FindTag("imm_atomic_imin"))
+    {
+        std::string dst0;
+        std::string dst1;
+        std::string dstAddress;
+        std::string src0;
+        Get4(dst0, dst1, dstAddress, src0);
+        // TODO : Implement.
+    }
+    else if (FindTag("imm_atomic_or"))
+    {
+        std::string dst0;
+        std::string dst1;
+        std::string dstAddress;
+        std::string src0;
+        Get4(dst0, dst1, dstAddress, src0);
+        // TODO : Implement.
+    }
+    else if (FindTag("imm_atomic_umax"))
+    {
+        std::string dst0;
+        std::string dst1;
+        std::string dstAddress;
+        std::string src0;
+        Get4(dst0, dst1, dstAddress, src0);
+        // TODOl : Implement.
+    }
+    else if (FindTag("imm_atomic_umin"))
+    {
+        std::string dst0;
+        std::string dst1;
+        std::string dstAddress;
+        std::string src0;
+        Get4(dst0, dst1, dstAddress, src0);
+        // TODO : Implement.
+    }
+    else if (FindTag("imm_atomic_xor"))
+    {
+        std::string dst0;
+        std::string dst1;
+        std::string dstAddress;
+        std::string src0;
+        Get4(dst0, dst1, dstAddress, src0);
+        // TODO : Implement.
+    }
+    else if (FindTag("ishl"))
+    {
+        PushOp2("<<", sat);
+    }
+    else if (FindTag("ishr"))
+    {
+        PushOp2(">>", sat);
+    }
+    else if (FindTag("ld_raw"))
+    {
+        std::string dst0;
+        Get1(dst0);
+
+        auto srcByteOffset = GetOperand();
+        auto src0 = GetOperand();
+
+        // TODO : 実装が怪しいので後でチェック.
+        std::string cmd = dst0 + " = " + src0 + "[" + srcByteOffset + "];\n";
+        PushInstruction(cmd);
+    }
+    else if (FindTag("ld_structured"))
+    {
+        std::string dst0;
+        Get1(dst0);
+
+        auto srcAddress    = GetOperand();
+        auto srcByteOffset = GetOperand();
+        auto src0          = GetOperand();
+
+        // TODO : 実装が怪しいので後でチェック.
+        std::string cmd = dst0 + " = " + src0 + "[" + srcAddress + "];\n";
+        PushInstruction(cmd);
+    }
+    else if (FindTag("ld_uav_typed"))
+    {
+        std::string dst0;
+        Get1(dst0);
+
+        auto srcAddress = GetOperand();
+        auto srcUAV = GetOperand();
+
+        std::string cmd = dst0 + " = " + srcUAV + "[" + srcAddress + "];\n";
+        PushInstruction(cmd);
+    }
+    else if (FindTag("rcp"))
+    {
+        PushCmd2("rcp", sat);
+    }
+    else if (m_Tokenizer.Compare("sample_indexable"))
+    {
+        std::string dest;
+        std::string texcoord;
+        std::string texture;
+        std::string sampler;
+        GetSampleIndexable0(dest, texture, sampler, texcoord);
+
+        std::string left = texture + ".Sample(" + sampler + ", " + texcoord + ")";
+        std::string cmd = dest + " = " + FilterSat(left, sat) + ";\n";
+        PushInstruction(cmd);
+    }
+    else if (m_Tokenizer.Compare("sample_aoffimmi_indexable"))
+    {
+        std::string dest;
+        std::string texture;
+        std::string sampler;
+        std::string texcoord;
+        std::string offset;
+        GetSampleOffsetIndexable0(dest, texture, sampler, texcoord, offset);
+
+        std::string cmd = dest + " = " + texture + ".Sample(" + sampler + ", " + texcoord + ", " + offset + ");\n";
+        PushInstruction(cmd);
+    }
+    else if (m_Tokenizer.Compare("sample_b"))
+    {
+        std::string dest;
+        std::string texture;
+        std::string sampler;
+        std::string texcoord;
+        std::string lodBias;
+        GetSampleIndexable1( dest, texture, sampler, texcoord, lodBias);
+
+        std::string cmd = dest + " = " + texture + "SampleBias(" + sampler + "," + texcoord + ", " + lodBias + ");\n";
+        PushInstruction(cmd);
+    }
+    else if (m_Tokenizer.Compare("sample_b_aoffimmi_indexable"))
+    {
+        std::string dest;
+        std::string texture;
+        std::string sampler;
+        std::string texcoord;
+        std::string offset;
+        std::string lodBias;
+        GetSampleOffsetIndexable1( dest, texture, sampler, texcoord, offset, lodBias );
+
+        std::string cmd = dest + " = " + texture + ".SampleBias(" + sampler + ", " + texcoord + ", " + lodBias + ", " + offset + ");\n";
+        PushInstruction(cmd);
+    }
+    else if (m_Tokenizer.Compare("sample_c_indexable"))
+    {
+        std::string dst;
+        std::string texture;
+        std::string sampler;
+        std::string texcoord;
+        std::string refValue;
+        GetSampleIndexable1(dst, texture, sampler, texcoord, refValue);
+
+        std::string cmd = dst + " = " + texture + ".SampleCmp(" + sampler + ", " + texcoord + ", " + refValue + ");\n";
+        PushInstruction(cmd);
+    }
+    else if (m_Tokenizer.Compare("sample_c_aoffimmi_indexable"))
+    {
+        std::string dest;
+        std::string texture;
+        std::string sampler;
+        std::string texcoord;
+        std::string offset;
+        std::string refValue;
+        GetSampleOffsetIndexable1(dest, texture, sampler, texcoord, offset, refValue);
+
+        std::string cmd = dest + " = " + texture + ".SampleCmp(" + sampler + ", " + texcoord + ", " + refValue + ", " + offset + ");\n";
+        PushInstruction(cmd);
+    }
+    else if (m_Tokenizer.Compare("sample_c_lz_indexable"))
+    {
+        std::string dest;
+        std::string texture;
+        std::string sampler;
+        std::string texcoord;
+        std::string refValue;
+        GetSampleIndexable1( dest, texture, sampler, texcoord, refValue );
+
+        std::string cmd = dest + " = " + texture + ".SampleCmpLevelZero(" + sampler + ", " + texcoord + ", "  + refValue + ");\n";
+        PushInstruction(cmd);
+    }
+    else if (m_Tokenizer.Compare("sample_c_lz_aoffimmi_indexable"))
+    {
+        std::string dest;
+        std::string texture;
+        std::string sampler;
+        std::string texcoord;
+        std::string offset;
+        std::string refValue;
+        GetSampleOffsetIndexable1( dest, texture, sampler, texcoord, offset, refValue );
+
+        std::string cmd = dest + " = " + texture + ".SampleCmpLevelZero(" + sampler + ", " + texcoord + ", " + refValue + ", " + offset + ");\n";
+        PushInstruction(cmd);
+    }
+    else if (m_Tokenizer.Compare("sample_d_indexable"))
+    {
+        std::string dest;
+        std::string texture;
+        std::string sampler;
+        std::string texcoord;
+        std::string xDerivative;
+        std::string yDerivative;
+        GetSample2( dest, texture, sampler, texcoord, xDerivative, yDerivative );
+
+        std::string left = texture + ".SampleGrad(" + sampler + ", " + texcoord + ", " + xDerivative + ", " + yDerivative + ")";
+        std::string cmd = dest + " = " + FilterSat( left, sat ) + ";\n";
+        PushInstruction(cmd);
+    }
+    else if(m_Tokenizer.Compare("sample_d_aoffimmi_indexable"))
+    {
+        std::string dest;
+        std::string texture;
+        std::string sampler;
+        std::string texcoord;
+        std::string offset;
+        std::string xDerivative;
+        std::string yDerivative;
+        GetSampleOffsetIndexable2(dest, texture, sampler, texcoord, offset, xDerivative, yDerivative);
+
+        std::string left = texture + ".SampleGrad(" + sampler + ", " + texcoord + ", " + xDerivative + ", " + yDerivative + ", " + offset + ")";
+        std::string cmd  = dest + " = " + FilterSat( left, sat ) + ";\n";
+        PushInstruction(cmd);
+    }
+    else if (m_Tokenizer.Compare("sample_l_indexable"))
+    {
+        std::string dest;
+        std::string texture;
+        std::string sampler;
+        std::string texcoord;
+        std::string lod;
+        GetSampleIndexable1(dest, texture, sampler, texcoord, lod);
+
+        std::string left = texture + ".SampleLevel(" + sampler + ", " + texcoord + ", " + lod + ")";
+        std::string cmd  = dest + " = " + FilterSat( left, sat ) + ";\n";
+        PushInstruction(cmd);
+    }
+    else if (m_Tokenizer.Compare("sample_l_aoffimmi_indexable"))
+    {
+        std::string dest;
+        std::string texture;
+        std::string sampler;
+        std::string texcoord;
+        std::string offset;
+        std::string lod;
+        GetSampleOffsetIndexable1( dest, texture, sampler, texcoord, offset, lod );
+
+        std::string left = texture + ".SampleLevel(" + sampler + ", " + texcoord + ", " + lod + ", " + offset + ")";
+        std::string cmd  = dest + " = " + FilterSat( left, sat ) + ";\n";
+        PushInstruction(cmd);
+    }
+    else if (FindTag("store_raw"))
+    {
+        auto dstUAV = GetOperand();
+
+        a3d::Reflection::ResourceInfo info;
+        if (m_Reflection.QueryUav(dstUAV, &info))
+        {
+            dstUAV = info.ExpandName;
+        }
+
+        char pat[] = { 'x', 'y', 'z', 'w' };
+        a3d::SwizzleInfo swz = {};
+        swz.Count = info.DimValue;
+        for(auto i=0; i<info.DimValue; ++i)
+        {
+            swz.Pattern[i] = pat[i];
+            swz.Index[i] = i;
+        }
+
+        auto dstAddress = GetOperand(swz);
+        auto src0       = GetOperand();
+
+        std::string cmd = dstUAV + "[" + dstAddress + "]" + " = " + src0 + ";\n";
+        PushInstruction(cmd);
+    }
+    else if (FindTag("store_structured"))
+    {
+        auto dstUAV = GetOperand();
+
+        a3d::Reflection::ResourceInfo info;
+        if (m_Reflection.QueryUav(dstUAV, &info))
+        {
+            dstUAV = info.ExpandName;
+        }
+
+        char pat[] = { 'x', 'y', 'z', 'w' };
+        a3d::SwizzleInfo swz = {};
+        swz.Count = info.DimValue;
+        for(auto i=0; i<info.DimValue; ++i)
+        {
+            swz.Pattern[i] = pat[i];
+            swz.Index[i] = i;
+        }
+
+        auto dstAddress = GetOperand(swz);
+        auto src0       = GetOperand();
+
+        std::string cmd = dstUAV + "[" + dstAddress + "]" + " = " + src0 + ";\n";
+        PushInstruction(cmd);
+    }
+    else if (FindTag("store_uav_typed"))
+    {
+        std::string dstUAV;
+        Get1(dstUAV);
+
+        a3d::Reflection::ResourceInfo info;
+        if (m_Reflection.QueryUav(dstUAV, &info))
+        {
+            dstUAV = info.ExpandName;
+        }
+
+        char pat[] = { 'x', 'y', 'z', 'w' };
+        a3d::SwizzleInfo swz = {};
+        swz.Count = info.DimValue;
+        for(auto i=0; i<info.DimValue; ++i)
+        {
+            swz.Pattern[i] = pat[i];
+            swz.Index[i] = i;
+        }
+
+        auto dstAddress = GetOperand(swz);
+        auto src0       = GetOperand();
+
+        std::string cmd = dstUAV + "[" + dstAddress + "]" + " = " + src0 + ";\n";
+        PushInstruction(cmd);
+    }
+    else if (FindTag("swapc"))
+    {
+        std::string dst0;
+        std::string dst1;
+        std::string src0;
+        std::string src1;
+        std::string src2;
+        Get5(dst0, dst1, src0, src1, src2);
+        // TODO : Implement.
+    }
+    else if (FindTag("sync"))
+    {
+        if (m_Tokenizer.Compare("sync_uglobal"))
+        {
+            // TODO : Implement.
+        }
+        else if (m_Tokenizer.Compare("sync_uglobal_g"))
+        {
+            // TODO : Implement.
+        }
+        else if (m_Tokenizer.Compare("sync_uglobal_g_t"))
+        {
+            // TODO : Implement.
+        }
+        else if (m_Tokenizer.Compare("sync_uglobal_t"))
+        {
+            // TODO : Implement.
+        }
+        else if (m_Tokenizer.Compare("sync_ugroup"))
+        {
+            // TODO : Implement.
+        }
+        else if (m_Tokenizer.Compare("sync_ugroup_g"))
+        {
+            // TODO : Implement.
+        }
+        else if (m_Tokenizer.Compare("sync_ugroup_g_t"))
+        {
+            // TODO : Implement.
+        }
+        else if (m_Tokenizer.Compare("sync_ugroup_t"))
+        {
+            // TODO : Implement.
+        }
+        else if (m_Tokenizer.Compare("sync_g"))
+        {
+            // TODO : Implement.
+        }
+        else if (m_Tokenizer.Compare("sync_g_t"))
+        {
+            // TODO : Implement.
+        }
+        else if (m_Tokenizer.Compare("sync_t"))
+        {
+            // TODO : Implement.
+        }
+    }
+    else if (FindTag("uaddc"))
+    {
+        std::string dst0;
+        Get1(dst0);
+
+        auto dst1 = GetOperand();
+        auto src0 = GetOperand();
+        auto src1 = GetOperand();
+
+        std::string cmd = dst0 + " = " + src0 + " + " + src1 + ";\n";
+        PushInstruction(cmd);
+    }
+    else if (FindTag("ubfe"))
+    {
+        std::string dst0;
+        std::string src0;
+        std::string src1;
+        std::string src2;
+        Get4(dst0, src0, src1, src2);
+        // TODO : Implement.
+    }
+    else if (FindTag("ushr"))
+    {
+        PushOp2(">>", sat);
+    }
+    else if (FindTag("usubb"))
+    {
+        std::string dst0;
+        Get1(dst0);
+
+        auto dst1 = GetOperand();
+        auto src0 = GetOperand();
+        auto src1 = GetOperand();
+
+        // TODO : 実装が怪しいので要確認.
+        std::string cmd = dst0 + "= " + src0 + " - " + src1 + ";\n";
+        PushInstruction(cmd);
+    }
+    else
+    {
+        return false;
+    }
+
+    return true;
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -1237,8 +2394,8 @@ std::string AsmParser::GetOperand()
     else
     {
         // 絶対値記号による修飾があるかどうかチェック.
-        auto pos1 = temp.find("|");
-        auto pos2 = temp.rfind("|");
+        auto pos1 = ret.find("|");
+        auto pos2 = ret.rfind("|");
         if (pos1 != std::string::npos 
          && pos2 != std::string::npos 
          && pos1 != pos2 )
@@ -1337,6 +2494,33 @@ a3d::SwizzleInfo AsmParser::Get4(std::string& op0, std::string& op1, std::string
     op1 = GetOperand(info);
     op2 = GetOperand(info);
     op3 = GetOperand(info);
+    return info;
+}
+
+//-------------------------------------------------------------------------------------------------
+//      命令に使用するオペランドを出力先のスウィズル数を考慮して5つ取得します.
+//-------------------------------------------------------------------------------------------------
+a3d::SwizzleInfo AsmParser::Get5(std::string& op0, std::string& op1, std::string& op2, std::string& op3, std::string& op4)
+{
+    auto info = Get1(op0);
+    op1 = GetOperand(info);
+    op2 = GetOperand(info);
+    op3 = GetOperand(info);
+    op4 = GetOperand(info);
+    return info;
+}
+
+//-------------------------------------------------------------------------------------------------
+//      命令に使用するオペランドを出力先のスウィズル数を考慮して6つ取得します.
+//-------------------------------------------------------------------------------------------------
+a3d::SwizzleInfo AsmParser::Get6(std::string& op0, std::string& op1, std::string& op2, std::string& op3, std::string& op4, std::string& op5)
+{
+    auto info = Get1(op0);
+    op1 = GetOperand(info);
+    op2 = GetOperand(info);
+    op3 = GetOperand(info);
+    op4 = GetOperand(info);
+    op5 = GetOperand(info);
     return info;
 }
 
@@ -1597,6 +2781,92 @@ void AsmParser::GetSampleIndexable2(std::string& dest, std::string& texture, std
 }
 
 //-------------------------------------------------------------------------------------------------
+//      サンプルオフセット命令のオペランドを取得します.
+//-------------------------------------------------------------------------------------------------
+void AsmParser::GetSampleOffsetIndexable0(std::string& dest, std::string& texture, std::string& sampler, std::string& texcoord, std::string& sampleOffset)
+{
+    m_Tokenizer.Next(); // "("
+    std::string type = m_Tokenizer.NextAsChar();
+    m_Tokenizer.Next(); // ")"
+
+    std::string args = GetArgs();
+    m_Tokenizer.Next();
+
+
+    std::string offset = GetArgs();
+
+    std::string dst;
+    Get1(dst);
+
+    std::string uv  = GetOperand();
+    std::string tex = GetOperand();
+    std::string smp = GetOperand();
+
+    std::string texName;
+    int cnt;
+    {
+        auto idx = tex.find(".");
+        if (idx != -1)
+        { tex = tex.substr(0, idx); }
+
+        a3d::Reflection::ResourceInfo info = {};
+        m_Reflection.QueryTexture(tex, &info);
+
+        texName = info.Name;
+        cnt = info.DimValue;
+        if (info.ArraySize > 1)
+        { texName += "[" + std::to_string(info.ArrayIndex) + "]"; }
+    }
+
+    a3d::SwizzleInfo swzInfo = {};
+    swzInfo.Count = cnt;
+    if (cnt >= 1)
+    {
+        swzInfo.Pattern[0] = 'x';
+        swzInfo.Index[0] = 0;
+    }
+    if (cnt >= 2)
+    {
+        swzInfo.Pattern[1] = 'y';
+        swzInfo.Index[1] = 1;
+    }
+    if (cnt >= 3)
+    {
+        swzInfo.Pattern[2] = 'z';
+        swzInfo.Index[2] = 2;
+    }
+
+    offset = "float3(" + offset + ")";
+    offset = m_Reflection.GetCastedString(offset, swzInfo);
+    offset = StringHelper::Replace(offset, "float", "uint");
+
+    dest         = dst;
+    texture      = texName;
+    sampler      = smp;
+    texcoord     = m_Reflection.GetCastedString(uv, swzInfo);
+    sampleOffset = offset;
+}
+
+//-------------------------------------------------------------------------------------------------
+//      サンプルオフセット命令のオペランドを取得します(オプション1個).
+//-------------------------------------------------------------------------------------------------
+void AsmParser::GetSampleOffsetIndexable1(std::string& dest, std::string& texture, std::string& sampler, std::string& texcoord, std::string& offset, std::string& arg1)
+{
+    GetSampleOffsetIndexable0(dest, texture, texcoord, sampler, offset);
+    arg1 = GetOperand();
+}
+
+//-------------------------------------------------------------------------------------------------
+//      サンプルオフセット命令のオペランドを取得します(オプション2個).
+//-------------------------------------------------------------------------------------------------
+void AsmParser::GetSampleOffsetIndexable2(std::string& dest, std::string& texture, std::string& sampler, std::string& texcoord, std::string& offset, std::string& arg1, std::string& arg2)
+{
+    GetSampleOffsetIndexable0(dest, texture, texcoord, sampler, offset);
+    arg1 = GetOperand();
+    arg2 = GetOperand();
+}
+
+//-------------------------------------------------------------------------------------------------
 //      ロード命令のオペランドを取得します.
 //-------------------------------------------------------------------------------------------------
 void AsmParser::GetLoad(std::string& dest, std::string& texture, std::string& texcoord)
@@ -1716,7 +2986,7 @@ void AsmParser::PushDp(int count, bool sat)
     std::string left = "dot(" + lhs + ", " + rhs + ")";
     std::string cmd = dst + " = " + FilterSat( left, sat ) + ";\n";
 
-    m_Instructions.push_back(cmd);
+    PushInstruction(cmd);
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -1730,7 +3000,7 @@ void AsmParser::PushCmd2(std::string tag, bool sat)
     std::string right = tag + "(" + src + ")";
     std::string cmd  = dst + " = " + FilterSat( right, sat ) + ";\n";
 
-    m_Instructions.push_back(cmd);
+    PushInstruction(cmd);
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -1744,7 +3014,7 @@ void AsmParser::PushCmd3(std::string tag, bool sat)
     std::string right = tag + "(" + lhs + ", " + rhs  + ")";
     std::string cmd  = dst + " = " + FilterSat( right, sat ) + ";\n";
 
-    m_Instructions.push_back(cmd);
+    PushInstruction(cmd);
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -1758,7 +3028,7 @@ void AsmParser::PushCmd4(std::string tag, bool sat)
     std::string right = tag + "(" + op1 + ", " + op2 + ", " + op3 + ")";
     std::string cmd   = dst + " = " + FilterSat( right, sat ) + ";\n";
 
-    m_Instructions.push_back(cmd);
+    PushInstruction(cmd);
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -1782,7 +3052,7 @@ void AsmParser::PushOp2(std::string tag, bool sat)
     std::string right = lhs + " " + tag + " " + rhs;
     std::string cmd   = dst + " = " + FilterSat( right, sat ) + ";\n";
 
-    m_Instructions.push_back(cmd);
+    PushInstruction(cmd);
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -1816,7 +3086,7 @@ void AsmParser::PushOp3(std::string tag1, std::string tag2, bool sat)
     std::string right = op1 + " " + tag1 + " " + op2 + " " + tag2 + " " + op3;
     std::string cmd   = dst + " = " + FilterSat( right, sat ) + ";\n";
 
-    m_Instructions.push_back(cmd);
+    PushInstruction(cmd);
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -1835,7 +3105,7 @@ void AsmParser::PushCmp(std::string tag, bool integer)
     if (swzDst.Count == 1)
     {
         std::string cmd = dst + " = ( " + lhs + " " + tag + " " + rhs + " ) ? " + one + " : " + zero + ";\n"; 
-        m_Instructions.push_back(cmd);
+        PushInstruction(cmd);
     }
     else
     {
@@ -1999,25 +3269,25 @@ void AsmParser::PushCmp(std::string tag, bool integer)
         if (swzDst.Count >= 1)
         {
             std::string cmd = dstX + " = ( " + leftX + " " + tag + " " + rightX + " ) ? " + one + " : " + zero + ";\n";
-            m_Instructions.push_back(cmd);
+            PushInstruction(cmd);
         }
 
         if (swzDst.Count >= 2)
         {
             std::string cmd = dstY + " = ( " + leftY + " " + tag + " " + rightY + " ) ? " + one + " : " + zero + ";\n";
-            m_Instructions.push_back(cmd);
+            PushInstruction(cmd);
         }
-            
+
         if (swzDst.Count >= 3)
         {
             std::string cmd = dstZ + " = ( " + leftZ + " " + tag + " " + rightZ + " ) ? " + one + " : " + zero + ";\n";
-            m_Instructions.push_back(cmd);
+            PushInstruction(cmd);
         }
 
         if (swzDst.Count == 4)
         {
             std::string cmd = dstW + " = ( " + leftW + " " + tag + " " + rightW + " ) ? " + one + " : " + zero + ";\n";
-            m_Instructions.push_back(cmd);
+            PushInstruction(cmd);
         }
     }
 }
@@ -2035,59 +3305,69 @@ void AsmParser::PushLogicOp(std::string op)
     if (info.Count != 1)
     {
         std::string cmd = "{\n";
-        m_Instructions.push_back(cmd);
-        cmd = "    uint" + std::to_string(info.Count) + " lhs_ = asuint(" + lhs + ");\n";
-        m_Instructions.push_back(cmd);
-        cmd = "    uint" + std::to_string(info.Count) + " rhs_ = asuint(" + rhs + ");\n";
-        m_Instructions.push_back(cmd);
-        cmd = "    " + dst + " = asfloat(lhs_ " + op + " rhs_);\n";
-        m_Instructions.push_back(cmd);
+        PushInstruction(cmd);
+        m_Indent++;
+
+        cmd = "uint" + std::to_string(info.Count) + " lhs_ = asuint(" + lhs + ");\n";
+        PushInstruction(cmd);
+        cmd = "uint" + std::to_string(info.Count) + " rhs_ = asuint(" + rhs + ");\n";
+        PushInstruction(cmd);
+        cmd = dst + " = asfloat(lhs_ " + op + " rhs_);\n";
+        PushInstruction(cmd);
+
+        m_Indent--;
         cmd = "}\n";
-        m_Instructions.push_back(cmd);
+        PushInstruction(cmd);
     }
     else
     {
         std::string cmd = "{\n";
-        m_Instructions.push_back(cmd);
+        PushInstruction(cmd);
+        m_Indent++;
 
         if (!StringHelper::IsValue(lhs))
         {
-            cmd = std::string("    uint") + " lhs_ = asuint(" + lhs + ");\n";
-            m_Instructions.push_back(cmd);
+            cmd = std::string("uint") + " lhs_ = asuint(" + lhs + ");\n";
+            PushInstruction(cmd);
         }
         else
         {
             // 浮動小数を含まない場合.
             if (lhs.find(".") == std::string::npos)
-            { cmd = std::string("    uint lhs_ = ") + lhs + ";\n"; }
+            { cmd = std::string("uint lhs_ = ") + lhs + ";\n"; }
             else
-            { cmd = std::string("    uint lhs_ = asuint(") + lhs + ");\n"; }
-            m_Instructions.push_back(cmd);
+            { cmd = std::string("uint lhs_ = asuint(") + lhs + ");\n"; }
+            PushInstruction(cmd);
         }
 
         if (!StringHelper::IsValue(rhs))
         {
-            cmd = std::string("    uint") + " rhs_ = asuint(" + rhs + ");\n";
-            m_Instructions.push_back(cmd);
+            cmd = std::string("uint") + " rhs_ = asuint(" + rhs + ");\n";
+            PushInstruction(cmd);
         }
         else
         {
             // 浮動小数を含まない場合.
             if (rhs.find(".") == std::string::npos)
-            { cmd = std::string("    uint rhs_ = ") + rhs + ";\n"; }
+            { cmd = std::string("uint rhs_ = ") + rhs + ";\n"; }
             else
-            { cmd = std::string("    uint rhs_s = asuint(") + rhs + ");\n"; }
-            m_Instructions.push_back(cmd);
+            { cmd = std::string("uint rhs_s = asuint(") + rhs + ");\n"; }
+            PushInstruction(cmd);
         }
 
         cmd = "    " + dst + " = asfloat(lhs_ " + op + " rhs_);\n";
-        m_Instructions.push_back(cmd);
+        PushInstruction(cmd);
+
+        m_Indent--;
         cmd = "}\n";
-        m_Instructions.push_back(cmd);
+        PushInstruction(cmd);
 
     }
 }
 
+//-------------------------------------------------------------------------------------------------
+//      シフト演算を追加します.
+//-------------------------------------------------------------------------------------------------
 void AsmParser::PushShiftOp(std::string op)
 {
     std::string dst, lhs, rhs;
@@ -2100,7 +3380,7 @@ void AsmParser::PushShiftOp(std::string op)
     }
 
     std::string cmd = dst + " = asuint(" + lhs + ") " + op + " " + rhsString +";\n";
-    m_Instructions.push_back(cmd);
+    PushInstruction(cmd);
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -2117,20 +3397,20 @@ void AsmParser::PushConvFromFloat(std::string tag, bool sat)
         if (info.HasPoint)
         {
             std::string cmd = dst + " = " + FilterSat( src, sat ) + ";\n";
-            m_Instructions.push_back(cmd);
+            PushInstruction(cmd);
         }
         else
         {
             std::string right = tag + "(" + src + ")";
             std::string cmd = dst + " = " + FilterSat( right, sat ) + ";\n";
-            m_Instructions.push_back(cmd);
+            PushInstruction(cmd);
         }
     }
     else
     {
         std::string right = tag + "(" + src + ")";
         std::string cmd = dst + " = " + FilterSat( right, sat ) + ";\n";
-        m_Instructions.push_back(cmd);
+        PushInstruction(cmd);
     }
 }
 
@@ -2149,12 +3429,12 @@ void AsmParser::PushConvToFloat(std::string tag, bool sat)
         {
             std::string right = tag + "(" + src + ")";
             std::string cmd = dst + " = " + FilterSat( right, sat ) + ";\n";
-            m_Instructions.push_back(cmd);
+            PushInstruction(cmd);
         }
         else
         {
             std::string cmd = dst + " = " + FilterSat( src, sat ) + ";\n";
-            m_Instructions.push_back(cmd);
+            PushInstruction(cmd);
         }
     }
     else
@@ -2169,7 +3449,7 @@ void AsmParser::PushConvToFloat(std::string tag, bool sat)
             {
                 add = true;
                 std::string cmd = dst + " = " + FilterSat( src, sat ) + ";\n";
-                m_Instructions.push_back(cmd);
+                PushInstruction(cmd);
             }
         }
 
@@ -2177,20 +3457,26 @@ void AsmParser::PushConvToFloat(std::string tag, bool sat)
         {
             std::string right = tag + "(" + src + ")";
             std::string cmd = dst + " = " + FilterSat( right, sat ) + ";\n";
-            m_Instructions.push_back(cmd);
+            PushInstruction(cmd);
         }
     }
 }
 
+//-------------------------------------------------------------------------------------------------
+//      代入命令を追加します.
+//-------------------------------------------------------------------------------------------------
 void AsmParser::PushMov(bool sat)
 {
     std::string dst, src;
     Get2(dst, src);
 
     std::string cmd = dst + " = " + FilterSat( src, sat ) + ";\n";
-    m_Instructions.push_back(cmd);
+    PushInstruction(cmd);
 }
 
+//-------------------------------------------------------------------------------------------------
+//      比較代入命令を追加します.
+//-------------------------------------------------------------------------------------------------
 void AsmParser::PushMovc(bool sat)
 {
     std::string dst, op0, op1, op2;
@@ -2199,7 +3485,7 @@ void AsmParser::PushMovc(bool sat)
     if (swzDst.Count == 1)
     {
         std::string cmd = dst + " = ( " + op0 + " >= 0 ) ? " + op1 + " : " + op2 + ";\n";
-        m_Instructions.push_back(cmd);
+        PushInstruction(cmd);
     }
     else
     {
@@ -2292,7 +3578,7 @@ void AsmParser::PushMovc(bool sat)
                                 + modOp0[i] + " > 0 ) ? " 
                                 + modOp1[i] + " : "
                                 + modOp2[i] + ";\n";
-            m_Instructions.push_back(cmd);
+            PushInstruction(cmd);
         }
     }
 }
@@ -2323,6 +3609,16 @@ bool AsmParser::ContainTag(std::string value)
     std::string token = m_Tokenizer.GetAsChar();
     auto pos = token.find(value);
     return (pos != std::string::npos);
+}
+
+void AsmParser::PushInstruction(const std::string& cmd)
+{
+    std::string instruction;
+    for(auto i=0; i<m_Indent; ++i)
+    { instruction += "    "; }
+    instruction += cmd;
+
+    m_Instructions.push_back(instruction);
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -2380,6 +3676,19 @@ void AsmParser::GenerateCode(std::string& sourceCode)
         sourceCode += "\n\n";
     }
 
+    if (m_Reflection.HasStructure())
+    {
+        sourceCode += "//-------------------------------------------------------------------------------------------------\n";
+        sourceCode += "// Structures.\n";
+        sourceCode += "//-------------------------------------------------------------------------------------------------\n";
+
+        const auto& code = m_Reflection.GetDefStructures();
+        for( auto& itr : code )
+        { sourceCode += StringHelper::Format("%s", itr.c_str()); }
+
+        sourceCode += "\n\n";
+    }
+
     // 定数バッファ書き込み.
     if (m_Reflection.HasBuffer())
     {
@@ -2402,6 +3711,20 @@ void AsmParser::GenerateCode(std::string& sourceCode)
         sourceCode += "//-------------------------------------------------------------------------------------------------\n";
 
         const auto& code = m_Reflection.GetDefTextures();
+        for( auto& itr : code )
+        { sourceCode += StringHelper::Format("%s", itr.c_str()); }
+
+        sourceCode += "\n\n";
+    }
+
+    // UAV書き込み.
+    if (m_Reflection.HasUav())
+    {
+        sourceCode += "//-------------------------------------------------------------------------------------------------\n";
+        sourceCode += "// Unordered Access Views.\n";
+        sourceCode += "//-------------------------------------------------------------------------------------------------\n";
+
+        const auto& code = m_Reflection.GetDefUavs();
         for( auto& itr : code )
         { sourceCode += StringHelper::Format("%s", itr.c_str()); }
 
@@ -2579,6 +3902,8 @@ bool AsmParser::Convert(const Argument& args)
 {
     bool attach = false;
     m_Argument = args;
+
+    m_Indent = 0;
 
     if (m_Argument.Output.empty())
     {

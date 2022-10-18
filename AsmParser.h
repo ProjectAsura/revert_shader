@@ -70,6 +70,11 @@ private:
     std::string                 m_ShaderProfile;
     std::vector<std::string>    m_Instructions;
     SHADER_TYPE                 m_ShaderType    = SHADER_TYPE_VERTEX;
+    int                         m_Indent        = 0;
+
+    uint32_t        m_ThreadCountX = 1;
+    uint32_t        m_ThreadCountY = 1;
+    uint32_t        m_ThreadCountZ = 1;
 
     bool m_BufferSection        = false;
     bool m_ResourceSection      = false;
@@ -82,15 +87,19 @@ private:
     //=============================================================================================
     bool LoadAsm(const char* filename);
     void ParseAsm();
-    void ParseInstruction();
+    bool ParseInstructionSM4();
+    bool ParseInstructionSM5();
 
     std::string GetOperand();
     std::string GetOperand(const a3d::SwizzleInfo& info);
     std::string GetArgs();
+
     a3d::SwizzleInfo Get1(std::string& op0);
     a3d::SwizzleInfo Get2(std::string& op0, std::string& op1);
     a3d::SwizzleInfo Get3(std::string& op0, std::string& op1, std::string& op2);
     a3d::SwizzleInfo Get4(std::string& op0, std::string& op1, std::string& op2, std::string& op3);
+    a3d::SwizzleInfo Get5(std::string& op0, std::string& op1, std::string& op2, std::string& op3, std::string& op4);
+    a3d::SwizzleInfo Get6(std::string& op0, std::string& op1, std::string& op2, std::string& op3, std::string& op4, std::string& op5);
     void GetSample0(std::string& dst, std::string& texture, std::string& sampler, std::string& texcoord );
     void GetSample1(std::string& dst, std::string& texture, std::string& sampler, std::string& texcoord, std::string& arg1);
     void GetSample2(std::string& dst, std::string& texture, std::string& sampler, std::string& texcoord, std::string& arg1, std::string& arg2);
@@ -100,6 +109,9 @@ private:
     void GetSampleIndexable0(std::string& dst, std::string& texture, std::string& sampler, std::string& texcoord);
     void GetSampleIndexable1(std::string& dst, std::string& texture, std::string& sampler, std::string& texcoord, std::string& arg1);
     void GetSampleIndexable2(std::string& dst, std::string& texture, std::string& sampler, std::string& texcoord, std::string& args1, std::string& arg2);
+    void GetSampleOffsetIndexable0(std::string& dst, std::string& texture, std::string& sampler, std::string& texcoord, std::string& offset);
+    void GetSampleOffsetIndexable1(std::string& dst, std::string& texture, std::string& sampler, std::string& texcoord, std::string& offset, std::string& arg1);
+    void GetSampleOffsetIndexable2(std::string& dst, std::string& texture, std::string& sampler, std::string& texcoord, std::string& offset, std::string& args1, std::string& arg2);
     void GetLoad(std::string& dest, std::string& texture, std::string& texcoord);
     void GetLoadOffset(std::string& dest, std::string& texture, std::string& texcoord, std::string& offset);
     void GetResInfo(std::string& dest, std::string& texture, std::string& mipLevel);
@@ -122,4 +134,6 @@ private:
     bool Parse();
     void GenerateCode(std::string& sourceCode);
     bool WriteCode(const std::string& sourceCode);
+
+    void PushInstruction(const std::string& cmd);
 };
